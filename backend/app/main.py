@@ -28,12 +28,22 @@ app = FastAPI(
     version="1.0.0",
 )
 
-origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+# Force-include production Vercel domain in case CORS_ORIGINS is unset or misformatted
+allowed_origins = [
+    "https://instant-virtual-predictor-app.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+env_origins = os.getenv("CORS_ORIGINS", "")
+if env_origins:
+    allowed_origins.extend([o.strip().rstrip("/") for o in env_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in origins if origin.strip()],
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origins=list(set(allowed_origins)),
+    allow_credentials=True,  # Set to True so Safari allows Auth headers cleanly
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

@@ -39,6 +39,7 @@ if (
 
 const response = await fetch(`${API}${path}`, {
   ...requestOptions,
+  mode: "cors", // Explicitly set CORS mode for Safari
   headers: {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
