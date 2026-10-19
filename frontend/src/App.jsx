@@ -265,48 +265,44 @@ export default function App() {
     if (!image) { setError("Choose a screenshot or take a photo first."); return; }
     setScanning(true); setScanProgress(0); setError(""); setScanResults([]); setResult(null);
     let worker;
+    
     try {
-      let fixtures = [];
-      let parserName = "local OCR fallback";
-      // Prefer the backend AI vision/document parser. The API key stays on the server.
-      try {
-        setScanProgress(10);
-        const imageData = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error("Could not read the uploaded image."));
-          reader.readAsDataURL(image);
-        });
-        const parsed = await api("/api/parse-screenshot", { method: "POST", body: { image_data: imageData, mime_type: image.type || "image/jpeg" } });
-        fixtures = (parsed.fixtures || []).map(f => ({ home: String(f.home || "").trim(), away: String(f.away || "").trim(), odds: Array.isArray(f.odds) ? f.odds.slice(0,3) : [null,null,null], needs_review: !!f.needs_review, confidence: f.confidence }));
-        parserName = "AI vision parser";
-        setOcrText(fixtures.map(f => `${f.home} vs ${f.away}
-${f.odds.map(v => v ?? "?").join("  ")}${f.needs_review ? "  [REVIEW REQUIRED]" : ""}`).join(""));
-      } catch (aiError) {
-        // If AI is not configured/unavailable, use OCR as a fallback rather than silently failing.
-        worker = await createWorker("eng", 1, { logger: m => { if (m.status === "recognizing text") setScanProgress(Math.round((m.progress || 0) * 75)); } });
-        const { data } = await worker.recognize(image);
-        const text = data.text || ""; setOcrText(text);
-        const lines = text.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
-        const ignored = /sportybet|virtual|football|soccer|odds|home|away|draw|over|under|stake|balance|deposit|withdraw|minute|second|total|market|live|today|1x2/i;
-        const numeric = v => v ? Number(String(v).replace(",", ".")) : null;
-        const addFixture = (home, away, odds=[null,null,null]) => {
-          home = String(home || "").replace(/^[^A-Za-z]+|[^A-Za-z0-9 .'-]+$/g, "").trim();
-          away = String(away || "").replace(/^[^A-Za-z]+|[^A-Za-z0-9 .'-]+$/g, "").trim();
-          if (home.length >= 2 && away.length >= 2 && home.toLowerCase() !== away.toLowerCase() && !ignored.test(home) && !ignored.test(away) && !fixtures.some(f => f.home.toLowerCase() === home.toLowerCase() && f.away.toLowerCase() === away.toLowerCase())) fixtures.push({home, away, odds, needs_review: true, confidence: 0.4});
-        };
-        for (const line of lines) {
-          const clean = line.replace(/[|]/g, " ").replace(/\s+/g, " ").trim();
-          const oddsMatch = clean.match(/(?:^|\s)([1-9]\d?(?:[.,]\d{1,3})?)\s+([1-9]\d?(?:[.,]\d{1,3})?)\s+([1-9]\d?(?:[.,]\d{1,3})?)\s*$/);
-          const prefix = oddsMatch ? clean.slice(0, oddsMatch.index).trim() : clean;
-          const sep = prefix.match(/^(.{2,40}?)\s+(?:vs?\.?|v\.?|[-–—])\s+(.{2,40}?)$/i);
-          if (sep) addFixture(sep[1], sep[2], oddsMatch ? oddsMatch.slice(1,4).map(numeric) : [null,null,null]);
-        }
-        if (!fixtures.length) throw new Error(`AI parser unavailable (${aiError.message}). Local OCR could not confidently identify team pairs. Configure OPENAI_API_KEY on the backend or upload a clearer screenshot.`);
+      // 1. Convert file to base64 image data string
+      setScanProgress(10);
+      const imageData = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read the uploaded image."));
+        reader.readAsDataURL(image);
+      });
+
+      // 2. Call backend AI vision parser with explicit CORS and payload error handling
+      setScanProgress(25);
+      const response = await fetch("https://instant-virtual-predictor-nmn1.onrender.com/api/parse-screenshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          image_data: imageData, 
+          mime_type: image.type || "image/jpeg" 
+        }),
+        mode: "cors"
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server error: ${response.status}`);
       }
-      if (!fixtures.length) throw new Error("No fixtures were detected. Upload a clear screenshot showing the team names and odds.");
+
+      const parsed = await response.json();
+      const fixtures = (parsed.fixtures || []).map(f => ({ home: String(f.home || "").trim(), away: String(f.away || "").trim(), odds: Array.isArray(f.odds) ? f.odds.slice(0,3) : [null,null,null], needs_review: !!f.needs_review, confidence: f.confidence }));
+      const parserName = "AI vision parser";
+      
+      setOcrText(fixtures.map(f => `${f.home} vs ${f.away}\n${f.odds.map(v => v ?? "?").join("  ")}${f.needs_review ? "  [REVIEW REQUIRED]" : ""}`).join(""));
+
+      if (!fixtures.length) throw new Error("No fixtures were detected by AI parser.");
+
       const remaining = Number(access?.credits_remaining || 0);
-      if (!access?.unlimited && fixtures.length > remaining) throw new Error(`This screenshot contains ${fixtures.length} matches, but your package has only ${remaining} predictions left. Upload a screenshot with ${remaining} or fewer matches, or purchase another package.`);
+      if (!access?.unlimited && fixtures.length > remaining) throw new Error(`This screenshot contains ${fixtures.length} matches, but your package has only ${remaining} predictions left.`);
+      
       const out=[];
       for (const f of fixtures) {
         setScanProgress(Math.min(95, 20 + Math.round((out.length / fixtures.length) * 75)));
@@ -320,7 +316,7 @@ ${f.odds.map(v => v ?? "?").join("  ")}${f.needs_review ? "  [REVIEW REQUIRED]" 
           "DOUBLE_CHANCE": ["1X — HOME OR DRAW", "1X — HOME OR DRAW", "X2 — DRAW OR AWAY"],
           "OVER_UNDER_1_5": ["OVER 1.5 GOALS", "OVER 1.5 GOALS", "OVER 1.5 GOALS"],
           "OVER_UNDER_2_5": ["OVER 2.5 GOALS", "UNDER 2.5 GOALS", "OVER 2.5 GOALS"],
-          "OVER_UNDER_3_5": ["OVER 3.5 GOALS", "UNDER 3.5 GOALS", "UNDER 3.5 GOALS"],
+          "OVER_UNDER_3_5": ["OVER 3.5 GOALS", "UNDER 3.5 GOALS", "OVER 3.5 GOALS"],
           "BTTS": ["BOTH TEAMS TO SCORE — YES", "BOTH TEAMS TO SCORE — NO", "BOTH TEAMS TO SCORE — YES"],
           "CORRECT_SCORE": scoreOptions
         };
@@ -328,8 +324,47 @@ ${f.odds.map(v => v ?? "?").join("  ")}${f.needs_review ? "  [REVIEW REQUIRED]" 
         out.push({...data,market:selectedMarket,random_pick:pick,selected_outcome:["1","X","2"][bestIndex],selected_probability:oddsProbs[bestIndex],detected_odds:f.odds,correct_score_options:[...new Set(scoreOptions)],correct_score_pick:scoreOptions[0],parser:parserName,needs_review:f.needs_review || !validOdds,parse_confidence:f.confidence});
       }
       setScanResults(out); setResult(out[0] || null); setAccess(out[out.length-1]?.access || access); await refreshHistory();
-    } catch (e) { setError(e.message || `Scan failed: ${e}`); }
-    finally { if (worker) await worker.terminate(); setScanning(false); }
+
+    } catch (error) {
+      console.warn("AI parse failed or backend returned 502/timeout, switching to local Tesseract OCR fallback...", error);
+      
+      // FALLBACK TO LOCAL TESSERACT OCR
+      try {
+        worker = await createWorker("eng", 1, { logger: m => { if (m.status === "recognizing text") setScanProgress(Math.round((m.progress || 0) * 75)); } });
+        const { data } = await worker.recognize(image);
+        const text = data.text || ""; setOcrText(text);
+        const lines = text.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+        const ignored = /sportybet|virtual|football|soccer|odds|home|away|draw|over|under|stake|balance|deposit|withdraw|minute|second|total|market|live|today|1x2/i;
+        const numeric = v => v ? Number(String(v).replace(",", ".")) : null;
+        let fixtures = [];
+        const addFixture = (home, away, odds=[null,null,null]) => {
+          home = String(home || "").replace(/^[^A-Za-z]+|[^A-Za-z0-9 .'-]+$/g, "").trim();
+          away = String(away || "").replace(/^[^A-Za-z]+|[^A-Za-z0-9 .'-]+$/g, "").trim();
+          if (home.length >= 2 && away.length >= 2 && home.toLowerCase() !== away.toLowerCase() && !ignored.test(home) && !ignored.test(away) && !fixtures.some(f => f.home.toLowerCase() === home.toLowerCase() && f.away.toLowerCase() === away.toLowerCase())) fixtures.push({home, away, odds, needs_review: true, confidence: 0.4});
+        };
+        for (const line of lines) {
+          const clean = line.replace(/[|]/g, " ").replace(/\s+/g, " ").trim();
+          const oddsMatch = clean.match(/(?:^|\s)([1-9]\d?(?:[.,]\d{1,3})?)\s+([1-9]\d?(?:[.,]\d{1,3})?)\s+([1-9]\d?(?:[.,]\d{1,3})?)\s*$/);
+          const prefix = oddsMatch ? clean.slice(0, oddsMatch.index).trim() : clean;
+          const sep = prefix.match(/^(.{2,40}?)\s+(?:vs?\.?|v\.?|[-–—])\s+(.{2,40}?)$/i);
+          if (sep) addFixture(sep[1], sep[2], oddsMatch ? oddsMatch.slice(1,4).map(numeric) : [null,null,null]);
+        }
+        if (!fixtures.length) throw new Error("Local OCR could not confidently identify team pairs from the screenshot.");
+        
+        // Process fallback fixtures
+        const out=[];
+        for (const f of fixtures) {
+          const data = await api("/api/predict", {method:"POST",body:{home_team:f.home,away_team:f.away,source:"screenshot",odds_home:f.odds[0],odds_draw:f.odds[1],odds_away:f.odds[2],notes:`Parser=Local Tesseract OCR Fallback; market=${selectedMarket};`}});
+          out.push({...data,market:selectedMarket,random_pick:"HOME WIN (1)",selected_outcome:"1",selected_probability:0.33,detected_odds:f.odds,parser:"Local Tesseract OCR",needs_review:true,parse_confidence:0.4});
+        }
+        setScanResults(out); setResult(out[0] || null); await refreshHistory();
+      } catch (ocrErr) {
+        setError(`Scan failed: ${ocrErr.message}`);
+      }
+    } finally { 
+      if (worker) await worker.terminate(); 
+      setScanning(false); 
+    }
   }
   async function submitPrediction(e) {
     e.preventDefault(); setError(""); setBusy(true); setResult(null);

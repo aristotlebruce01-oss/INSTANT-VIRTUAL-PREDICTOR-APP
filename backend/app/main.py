@@ -701,8 +701,10 @@ def parse_screenshot(req: ScreenshotParseRequest, authorization: Optional[str] =
     prompt = "Read this betting app screenshot. Extract EVERY clearly visible virtual football fixture, in screen order. Return ONLY JSON shaped as {\"fixtures\":[{\"home\":string,\"away\":string,\"odds\":[number|null,number|null,number|null],\"confidence\":number,\"needs_review\":boolean,\"evidence\":string}]}. odds order is Home, Draw, Away and only copy odds actually visible on the same fixture row. Do not infer, invent, complete, or guess names/odds. If unclear, use null and needs_review=true. Ignore menus, balance, navigation and unrelated numbers. Include at least three fixtures if three or more are visible."
     payload = {"model": os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"), "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(decoded).decode('ascii')}", "detail": "high"}}]}]}
     request = urllib.request.Request("https://api.openai.com/v1/chat/completions", data=json.dumps(payload).encode(), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, method="POST")
+    
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        # Reduced timeout to 25 seconds to stay safely below Render's 30s limit
+        with urllib.request.urlopen(request, timeout=25) as response:
             result = json.loads(response.read().decode())
         content = result["choices"][0]["message"]["content"]
         parsed = json.loads(content)
@@ -724,14 +726,14 @@ def parse_screenshot(req: ScreenshotParseRequest, authorization: Optional[str] =
         if not unique:
             raise HTTPException(status_code=422, detail="The AI parser could not confidently identify fixtures. Upload a clearer screenshot.")
         return {"parser": "ai-vision", "fixtures": unique, "review_required": any(f["needs_review"] for f in unique)}
+        
     except HTTPException:
         raise
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")[:500]
-        raise HTTPException(status_code=502, detail=f"AI document parser request failed ({exc.code}). Check the backend API key/model configuration. {detail}")
+        detail = exc.read().decode("utf-8", "ignore")[:300]
+        raise HTTPException(status_code=502, detail=f"OpenAI API error ({exc.code}): {detail}")
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"AI document parser failed to read the screenshot: {str(exc)[:200]}")
-
+        raise HTTPException(status_code=400, detail=f"AI parsing timed out or failed: {str(exc)[:150]}. Falling back to local OCR.")
 
 @app.post("/api/predict")
 def predict(req: PredictionRequest, authorization: Optional[str] = Header(default=None)):
